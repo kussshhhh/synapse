@@ -13,24 +13,37 @@ export default function ItemList({ refresh, onRefreshComplete }: ItemListProps) 
   const [error, setError] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [searchMode, setSearchMode] = useState<'hybrid' | 'semantic' | 'text'>('hybrid');
+  const [currentPage, setCurrentPage] = useState(1);
+  const [hasMore, setHasMore] = useState(true);
+  const itemsPerPage = 10;
 
-  const loadItems = async (query = '', mode = searchMode) => {
+  const loadItems = async (query = '', mode = searchMode, page = 1, append = false) => {
     setLoading(true);
     setError('');
     
     try {
+      const skip = (page - 1) * itemsPerPage;
       let data;
+      
       if (!query) {
-        data = await getItems();
+        data = await getItems(skip, itemsPerPage);
       } else if (mode === 'semantic') {
-        data = await semanticSearchItems(query);
+        data = await semanticSearchItems(query, skip, itemsPerPage);
       } else if (mode === 'text') {
-        data = await searchItems(query, 0, 10, false); // semantic=false
+        data = await searchItems(query, skip, itemsPerPage, false); // semantic=false
       } else {
         // hybrid (default)
-        data = await searchItems(query, 0, 10, true); // semantic=true
+        data = await searchItems(query, skip, itemsPerPage, true); // semantic=true
       }
-      setItems(data);
+      
+      setHasMore(data.length === itemsPerPage);
+      
+      if (append) {
+        setItems(prev => [...prev, ...data]);
+      } else {
+        setItems(data);
+        setCurrentPage(page);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load items');
     } finally {
@@ -44,14 +57,38 @@ export default function ItemList({ refresh, onRefreshComplete }: ItemListProps) 
 
   useEffect(() => {
     if (refresh) {
-      loadItems(searchQuery);
+      setCurrentPage(1);
+      loadItems(searchQuery, searchMode, 1);
       onRefreshComplete?.();
     }
   }, [refresh]);
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
-    loadItems(searchQuery, searchMode);
+    setCurrentPage(1);
+    loadItems(searchQuery, searchMode, 1);
+  };
+
+  const handleNextPage = () => {
+    if (hasMore && !loading) {
+      const nextPage = currentPage + 1;
+      loadItems(searchQuery, searchMode, nextPage);
+    }
+  };
+
+  const handlePrevPage = () => {
+    if (currentPage > 1 && !loading) {
+      const prevPage = currentPage - 1;
+      loadItems(searchQuery, searchMode, prevPage);
+    }
+  };
+
+  const handleLoadMore = () => {
+    if (hasMore && !loading) {
+      const nextPage = currentPage + 1;
+      loadItems(searchQuery, searchMode, nextPage, true);
+      setCurrentPage(nextPage);
+    }
   };
 
   const formatDate = (dateString: string) => {
@@ -89,7 +126,8 @@ export default function ItemList({ refresh, onRefreshComplete }: ItemListProps) 
               type="button" 
               onClick={() => {
                 setSearchQuery('');
-                loadItems();
+                setCurrentPage(1);
+                loadItems('', searchMode, 1);
               }}
             >
               Clear
@@ -105,7 +143,8 @@ export default function ItemList({ refresh, onRefreshComplete }: ItemListProps) 
               onChange={(e) => {
                 const mode = e.target.value as 'hybrid' | 'semantic' | 'text';
                 setSearchMode(mode);
-                loadItems(searchQuery, mode);
+                setCurrentPage(1);
+                loadItems(searchQuery, mode, 1);
               }}
               className="search-mode-select"
             >
@@ -194,6 +233,48 @@ export default function ItemList({ refresh, onRefreshComplete }: ItemListProps) 
           </div>
         ))}
       </div>
+
+      {/* Pagination Controls */}
+      {items.length > 0 && (
+        <div className="pagination">
+          <div className="pagination-info">
+            Page {currentPage} • {items.length} items
+          </div>
+          
+          <div className="pagination-controls">
+            <button 
+              onClick={handlePrevPage} 
+              disabled={currentPage <= 1 || loading}
+              className="pagination-btn"
+            >
+              ← Previous
+            </button>
+            
+            <span className="pagination-current">
+              {currentPage}
+            </span>
+            
+            <button 
+              onClick={handleNextPage} 
+              disabled={!hasMore || loading}
+              className="pagination-btn"
+            >
+              Next →
+            </button>
+          </div>
+
+          {/* Alternative: Load More button */}
+          {hasMore && (
+            <button 
+              onClick={handleLoadMore} 
+              disabled={loading}
+              className="load-more-btn"
+            >
+              {loading ? 'Loading...' : 'Load More'}
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }

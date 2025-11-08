@@ -34,6 +34,12 @@ class CLIPEmbeddingService:
     def generate_text_embedding(self, text: str) -> np.ndarray:
         """Generate embedding for text."""
         try:
+            # Truncate text to fit CLIP's 77 token limit (roughly 300-400 characters)
+            max_chars = 300
+            if len(text) > max_chars:
+                text = text[:max_chars].rsplit(' ', 1)[0] + '...'
+                logger.info(f"Truncated text to {len(text)} characters for embedding")
+            
             inputs = self.processor(text=[text], return_tensors="pt", padding=True)
             inputs = {k: v.to(self.device) for k, v in inputs.items()}
             

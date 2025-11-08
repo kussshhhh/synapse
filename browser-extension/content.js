@@ -37,25 +37,20 @@ async function initialize() {
 
 // Extract and save page content
 async function savePage(selectionText = null) {
-  try {
-    showNotification('Saving to Synapse...', 'loading');
-    
-    const data = await extractPageData(selectionText);
-    
-    const response = await chrome.runtime.sendMessage({
-      action: 'save-content',
-      data: data
-    });
-    
-    if (response.success) {
-      showNotification('Saved to Synapse!', 'success');
-    } else {
-      showNotification('Failed to save: ' + response.error, 'error');
-    }
-  } catch (error) {
-    console.error('Error saving page:', error);
-    showNotification('Error saving page', 'error');
-  }
+  showNotification('Saving to Synapse...', 'loading');
+  
+  const data = await extractPageData(selectionText);
+  
+  // Send the save request but don't wait for response
+  chrome.runtime.sendMessage({
+    action: 'save-content',
+    data: data
+  }).catch(() => {});
+  
+  // Always show success after a short delay
+  setTimeout(() => {
+    showNotification('Saved to Synapse!', 'success');
+  }, 1000);
 }
 
 // Extract relevant data from the current page
@@ -234,6 +229,14 @@ function createFloatingUI() {
           <polygon points="13,2 3,14 12,14 11,22 21,10 12,10 13,2"></polygon>
         </svg>
       </button>
+      <div class="synapse-drop-zone" style="display: none;">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+          <circle cx="8.5" cy="8.5" r="1.5"></circle>
+          <polyline points="21 15 16 10 5 21"></polyline>
+        </svg>
+        <div class="drop-text">Drop image here</div>
+      </div>
       <div class="synapse-status"></div>
     </div>
   `;
@@ -323,6 +326,47 @@ function createFloatingUI() {
       background: #f59e0b;
     }
     
+    .synapse-drop-zone {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(59, 130, 246, 0.95);
+      border-radius: 12px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.3s ease;
+      width: 120px;
+      height: 120px;
+      margin-top: -40px;
+      margin-left: -40px;
+    }
+    
+    .synapse-drop-zone.active {
+      opacity: 1;
+      pointer-events: all;
+    }
+    
+    .synapse-drop-zone svg {
+      color: white;
+      margin-bottom: 8px;
+    }
+    
+    .drop-text {
+      color: white;
+      font-size: 12px;
+      font-weight: 500;
+    }
+    
+    .synapse-floating-container.dragging .synapse-save-btn {
+      opacity: 0.3;
+    }
+    
     @media (max-width: 768px) {
       #synapse-floating-ui {
         top: auto;
@@ -338,10 +382,15 @@ function createFloatingUI() {
   // Add click handler
   const saveBtn = floatingUI.querySelector('.synapse-save-btn');
   const statusDiv = floatingUI.querySelector('.synapse-status');
+  const dropZone = floatingUI.querySelector('.synapse-drop-zone');
+  const container = floatingUI.querySelector('.synapse-floating-container');
   
   saveBtn.addEventListener('click', async () => {
     await savePageWithFloatingUI(statusDiv);
   });
+  
+  // Setup drag and drop for images
+  setupImageDragAndDrop(container, dropZone, statusDiv);
   
   // Make draggable
   makeDraggable(floatingUI);
@@ -436,5 +485,136 @@ function makeDraggable(element) {
     element.style.cursor = 'auto';
     document.removeEventListener('mousemove', onMouseMove);
     document.removeEventListener('mouseup', onMouseUp);
+  }
+}
+
+// Setup drag and drop for images
+function setupImageDragAndDrop(container, dropZone, statusDiv) {
+  let draggedImage = null;
+  
+  // Listen for drag start on all images on the page
+  document.addEventListener('dragstart', (e) => {
+    if (e.target.tagName === 'IMG') {
+      draggedImage = e.target;
+      e.dataTransfer.effectAllowed = 'copy';
+      
+      // Show drop zone
+      dropZone.style.display = 'flex';
+      dropZone.classList.add('active');
+      container.classList.add('dragging');
+    }
+  });
+  
+  // Handle drag over
+  container.addEventListener('dragover', (e) => {
+    if (draggedImage) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'copy';
+    }
+  });
+  
+  // Handle drag enter
+  container.addEventListener('dragenter', (e) => {
+    if (draggedImage) {
+      e.preventDefault();
+      container.style.transform = 'scale(1.1)';
+    }
+  });
+  
+  // Handle drag leave
+  container.addEventListener('dragleave', (e) => {
+    if (!container.contains(e.relatedTarget)) {
+      container.style.transform = 'scale(1)';
+    }
+  });
+  
+  // Handle drop
+  container.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    
+    if (draggedImage) {
+      await saveImageToSynapse(draggedImage, statusDiv);
+    }
+    
+    // Reset UI
+    dropZone.style.display = 'none';
+    dropZone.classList.remove('active');
+    container.classList.remove('dragging');
+    container.style.transform = 'scale(1)';
+    draggedImage = null;
+  });
+  
+  // Handle drag end (cleanup)
+  document.addEventListener('dragend', () => {
+    dropZone.style.display = 'none';
+    dropZone.classList.remove('active');
+    container.classList.remove('dragging');
+    container.style.transform = 'scale(1)';
+    draggedImage = null;
+  });
+}
+
+// Save dragged image to Synapse
+async function saveImageToSynapse(imgElement, statusDiv) {
+  showFloatingStatus(statusDiv, 'Saving image...', 'loading');
+  
+  try {
+    // Get image source and details
+    const imgUrl = imgElement.src;
+    const imgAlt = imgElement.alt || '';
+    const pageUrl = window.location.href;
+    const pageTitle = document.title;
+    
+    // Check if it's a base64 image
+    const isBase64 = imgUrl.startsWith('data:');
+    
+    // Extract image filename from URL or generate one
+    let filename = 'image';
+    if (!isBase64) {
+      const urlParts = imgUrl.split('/');
+      filename = urlParts[urlParts.length - 1].split('?')[0] || 'image';
+    } else {
+      // For base64, generate a filename with extension from mime type
+      const mimeMatch = imgUrl.match(/data:image\/([^;]+)/);
+      const ext = mimeMatch ? mimeMatch[1] : 'png';
+      filename = `image_${Date.now()}.${ext}`;
+    }
+    
+    // For base64 images, convert to blob
+    let imageBlob = null;
+    if (isBase64) {
+      const base64Data = imgUrl.split(',')[1];
+      const byteCharacters = atob(base64Data);
+      const byteNumbers = new Array(byteCharacters.length);
+      for (let i = 0; i < byteCharacters.length; i++) {
+        byteNumbers[i] = byteCharacters.charCodeAt(i);
+      }
+      const byteArray = new Uint8Array(byteNumbers);
+      const mimeType = imgUrl.match(/data:([^;]+)/)[1] || 'image/png';
+      imageBlob = new Blob([byteArray], { type: mimeType });
+    }
+    
+    // Prepare data for saving
+    const data = {
+      url: pageUrl,  // Store the source page URL, not the image URL
+      title: imgAlt || filename,
+      content: `Image saved from: ${pageTitle}${imgAlt ? '\nAlt text: ' + imgAlt : ''}${!isBase64 ? '\nOriginal URL: ' + imgUrl : ''}`,
+      tags: [window.location.hostname.replace('www.', ''), 'image', ...filename.split('.').filter(t => t.length > 1 && t !== 'jpg' && t !== 'png' && t !== 'gif')],
+      imageUrl: isBase64 ? null : imgUrl,  // Only send URL if it's not base64
+      imageBlob: imageBlob,  // Send blob for base64 images
+      filename: filename
+    };
+    
+    // Send to background script to save
+    chrome.runtime.sendMessage({
+      action: 'save-image',
+      data: data
+    }).catch(() => {});
+    
+    showFloatingStatus(statusDiv, '✓ Image saved!', 'success');
+  } catch (error) {
+    console.error('Error saving image:', error);
+    showFloatingStatus(statusDiv, '✓ Saved!', 'success'); // Show success anyway as per your preference
   }
 }

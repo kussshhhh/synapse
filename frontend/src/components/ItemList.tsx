@@ -203,7 +203,7 @@ export default function ItemList({ refresh, onRefreshComplete }: ItemListProps) 
                 </div>
               )}
               
-              {item.url && (
+              {item.url && item.type !== 'image' && (
                 <a 
                   href={item.url} 
                   target="_blank" 
@@ -212,6 +212,20 @@ export default function ItemList({ refresh, onRefreshComplete }: ItemListProps) 
                 >
                   {item.url}
                 </a>
+              )}
+              
+              {/* For images, show source page if URL exists */}
+              {item.type === 'image' && item.url && !item.url.startsWith('data:') && (
+                <div className="item-source">
+                  Source: <a 
+                    href={item.url} 
+                    target="_blank" 
+                    rel="noopener noreferrer"
+                    className="item-source-link"
+                  >
+                    {new URL(item.url).hostname}
+                  </a>
+                </div>
               )}
               
               {item.raw_content && (

@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Form, UploadFile, File
+from fastapi import FastAPI, HTTPException, Form, UploadFile, File, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
@@ -8,8 +8,9 @@ import logging
 from datetime import datetime
 
 from app.database import get_db
-from app.utils.s3 import upload_file, create_bucket_if_not_exists
+from app.utils.s3 import upload_file, create_bucket_if_not_exists, download_file_bytes
 from app.utils.embeddings import get_embedding_service
+from app.utils.claude_service import get_claude_service
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -95,6 +96,7 @@ async def get_current_user():
 
 @app.post("/api/items", response_model=Item)
 async def create_item(
+    background_tasks: BackgroundTasks,
     # For files
     file: Optional[UploadFile] = File(None),
     # For form data (works with both JSON and multipart)
@@ -200,6 +202,17 @@ async def create_item(
         except Exception as e:
             logger.error(f"Failed to generate embedding for item {item_id}: {str(e)}")
             # Don't fail the request if embedding generation fails
+        
+        # Add background task for Claude enhancement
+        background_tasks.add_task(
+            claude_enhance_item,
+            item_id,
+            type,
+            title or "",
+            url or "",
+            raw_content or "",
+            s3_key
+        )
         
         return Item(
             id=str(result['id']),
@@ -379,6 +392,79 @@ async def semantic_search_items(q: str, skip: int = 0, limit: int = 10, threshol
     except Exception as e:
         logger.error(f"Semantic search failed: {e}")
         raise HTTPException(status_code=500, detail=f"Semantic search failed: {str(e)}")
+
+async def claude_enhance_item(item_id: str, item_type: str, title: str, url: str, raw_content: str, s3_key: Optional[str]):
+    """Background task to enhance item with Claude-generated tags."""
+    try:
+        logger.info(f"Starting Claude enhancement for item {item_id}")
+        
+        # Get Claude service
+        claude_service = get_claude_service()
+        claude_tags = []
+        
+        if item_type == 'image' and s3_key:
+            try:
+                # Download image from S3
+                logger.info(f"Downloading image {s3_key} for Claude analysis")
+                image_bytes = download_file_bytes(s3_key)
+                claude_tags = await claude_service.analyze_image_for_tags(
+                    image_bytes, title, url
+                )
+                logger.info(f"Claude analyzed image and generated tags: {claude_tags}")
+            except Exception as e:
+                logger.error(f"Failed to analyze image {s3_key}: {e}")
+                
+        elif item_type in ['url', 'pdf'] and raw_content:
+            try:
+                claude_tags = await claude_service.analyze_article_for_tags(
+                    raw_content, title, url
+                )
+                logger.info(f"Claude analyzed content and generated tags: {claude_tags}")
+            except Exception as e:
+                logger.error(f"Failed to analyze content for item {item_id}: {e}")
+        
+        # Merge with existing tags if we got any from Claude
+        if claude_tags:
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    # Get current tags
+                    cur.execute("SELECT tags FROM items WHERE id = %s", (item_id,))
+                    result = cur.fetchone()
+                    
+                    if result:
+                        existing_tags = result['tags'] or []
+                        # Merge and deduplicate tags
+                        enhanced_tags = list(set(existing_tags + claude_tags))
+                        
+                        # Update item with enhanced tags
+                        cur.execute(
+                            "UPDATE items SET tags = %s WHERE id = %s",
+                            (enhanced_tags, item_id)
+                        )
+                        logger.info(f"Updated item {item_id} with enhanced tags: {enhanced_tags}")
+                conn.commit()
+        else:
+            logger.info(f"No Claude tags generated for item {item_id}")
+            
+    except Exception as e:
+        logger.error(f"Claude enhancement failed for item {item_id}: {e}")
+
+@app.post("/api/search/analyze")
+async def analyze_search_query(query: str):
+    """Analyze search query with Claude to determine best search strategy."""
+    try:
+        claude_service = get_claude_service()
+        analysis = await claude_service.analyze_search_query(query)
+        return analysis
+    except Exception as e:
+        logger.error(f"Search analysis failed: {e}")
+        # Return default analysis if Claude fails
+        return {
+            "searchMode": "hybrid",
+            "contentType": "any",
+            "enhancedTerms": [query],
+            "reasoning": "Claude analysis failed, using default hybrid search"
+        }
 
 if __name__ == "__main__":
     import uvicorn

@@ -46,6 +46,16 @@ def download_file(key: str):
         print(f"Error downloading file: {e}")
         raise
 
+def download_file_bytes(key: str) -> bytes:
+    """Download a file from S3 and return as bytes."""
+    s3 = get_s3_client()
+    try:
+        response = s3.get_object(Bucket=settings.s3_bucket, Key=key)
+        return response['Body'].read()
+    except Exception as e:
+        print(f"Error downloading file bytes: {e}")
+        raise
+
 def delete_file(key: str):
     """Delete a file from S3."""
     s3 = get_s3_client()

@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     # Security
     secret_key: str = "your-secret-key-here-change-in-production"
     
+    # Claude API (LiteLLM proxy format)
+    anthropic_base_url: Optional[str] = None
+    anthropic_auth_token: Optional[str] = None
+    
     # Environment
     environment: str = "development"
 

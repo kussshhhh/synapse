@@ -7,7 +7,10 @@ function App() {
   const [refreshItems, setRefreshItems] = useState(false)
 
   const handleUploadSuccess = () => {
-    setRefreshItems(true)
+    // Small delay to ensure backend has processed the upload
+    setTimeout(() => {
+      setRefreshItems(true)
+    }, 500)
   }
 
   const handleRefreshComplete = () => {

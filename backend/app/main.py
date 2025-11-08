@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException, Form, UploadFile, File, BackgroundTa
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
+from fastapi import Query
 import uuid
 import json
 import logging
@@ -281,7 +282,7 @@ async def get_item(item_id: str):
     )
 
 @app.get("/api/search")
-async def search_items(q: str, skip: int = 0, limit: int = 10, semantic: bool = True):
+async def search_items(q: str, skip: int = 0, limit: int = 10, semantic: bool = True, content_types: List[str] = Query([])):
     """Search items using both text search and semantic similarity."""
     
     if semantic:
@@ -292,28 +293,42 @@ async def search_items(q: str, skip: int = 0, limit: int = 10, semantic: bool = 
             
             with get_db() as conn:
                 with conn.cursor() as cur:
-                    # Hybrid search: combine text search with semantic similarity
-                    cur.execute("""
-                        SELECT 
-                            i.id, i.user_id, i.type, i.title, i.url, i.raw_content, i.tags, i.s3_key, i.created_at,
-                            COALESCE(1 - (e.embedding <=> %s::vector), 0) as similarity_score
-                        FROM items i
-                        LEFT JOIN embeddings e ON i.id = e.item_id
-                        WHERE 
-                            i.title ILIKE %s OR i.raw_content ILIKE %s OR EXISTS (SELECT 1 FROM unnest(i.tags) AS tag WHERE tag ILIKE %s)
-                            OR (e.embedding IS NOT NULL AND e.embedding <=> %s::vector < 0.5)
-                        ORDER BY 
-                            CASE WHEN i.title ILIKE %s OR i.raw_content ILIKE %s THEN 1 ELSE 0 END DESC,
-                            similarity_score DESC,
-                            i.created_at DESC
-                        LIMIT %s OFFSET %s
-                    """, (
+                    # Build WHERE clause with optional content type filter
+                    where_conditions = [
+                        "i.title ILIKE %s OR i.raw_content ILIKE %s OR EXISTS (SELECT 1 FROM unnest(i.tags) AS tag WHERE tag ILIKE %s)",
+                        "(e.embedding IS NOT NULL AND e.embedding <=> %s::vector < 0.5)"
+                    ]
+                    params = [
                         query_embedding.tolist(), 
                         f"%{q}%", f"%{q}%", f"%{q}%",  # Text search params
                         query_embedding.tolist(),  # Semantic search param
                         f"%{q}%", f"%{q}%",  # Ordering params
                         limit, skip
-                    ))
+                    ]
+                    
+                    if content_types and len(content_types) > 0:
+                        # Filter for multiple content types
+                        type_placeholders = ','.join(['%s'] * len(content_types))
+                        where_conditions.append(f"i.type = ANY(ARRAY[{type_placeholders}])")
+                        for content_type in content_types:
+                            params.insert(-2, content_type)  # Insert before limit and skip
+                    
+                    where_clause = " AND ".join([f"({condition})" for condition in where_conditions])
+                    
+                    # Hybrid search: combine text search with semantic similarity
+                    cur.execute(f"""
+                        SELECT 
+                            i.id, i.user_id, i.type, i.title, i.url, i.raw_content, i.tags, i.s3_key, i.created_at,
+                            COALESCE(1 - (e.embedding <=> %s::vector), 0) as similarity_score
+                        FROM items i
+                        LEFT JOIN embeddings e ON i.id = e.item_id
+                        WHERE {where_clause}
+                        ORDER BY 
+                            CASE WHEN i.title ILIKE %s OR i.raw_content ILIKE %s THEN 1 ELSE 0 END DESC,
+                            similarity_score DESC,
+                            i.created_at DESC
+                        LIMIT %s OFFSET %s
+                    """, params)
                     results = cur.fetchall()
         except Exception as e:
             logger.error(f"Semantic search failed, falling back to text search: {e}")
@@ -324,12 +339,25 @@ async def search_items(q: str, skip: int = 0, limit: int = 10, semantic: bool = 
         # Traditional text search
         with get_db() as conn:
             with conn.cursor() as cur:
-                cur.execute("""
+                # Build WHERE clause with optional content type filter
+                where_conditions = ["title ILIKE %s OR raw_content ILIKE %s OR EXISTS (SELECT 1 FROM unnest(tags) AS tag WHERE tag ILIKE %s)"]
+                params = [f"%{q}%", f"%{q}%", f"%{q}%", limit, skip]
+                
+                if content_types and len(content_types) > 0:
+                    # Filter for multiple content types
+                    type_placeholders = ','.join(['%s'] * len(content_types))
+                    where_conditions.append(f"type = ANY(ARRAY[{type_placeholders}])")
+                    for content_type in content_types:
+                        params.insert(-2, content_type)  # Insert before limit and skip
+                
+                where_clause = " AND ".join([f"({condition})" for condition in where_conditions])
+                
+                cur.execute(f"""
                     SELECT id, user_id, type, title, url, raw_content, tags, s3_key, created_at
                     FROM items 
-                    WHERE title ILIKE %s OR raw_content ILIKE %s OR EXISTS (SELECT 1 FROM unnest(tags) AS tag WHERE tag ILIKE %s)
+                    WHERE {where_clause}
                     ORDER BY created_at DESC LIMIT %s OFFSET %s
-                """, (f"%{q}%", f"%{q}%", f"%{q}%", limit, skip))
+                """, params)
                 results = cur.fetchall()
     
     return [
@@ -347,7 +375,7 @@ async def search_items(q: str, skip: int = 0, limit: int = 10, semantic: bool = 
     ]
 
 @app.get("/api/semantic-search")
-async def semantic_search_items(q: str, skip: int = 0, limit: int = 10, threshold: float = 0.3):
+async def semantic_search_items(q: str, skip: int = 0, limit: int = 10, threshold: float = 0.3, content_types: List[str] = Query([])):
     """Pure semantic search using embeddings."""
     try:
         embedding_service = get_embedding_service()
@@ -355,21 +383,34 @@ async def semantic_search_items(q: str, skip: int = 0, limit: int = 10, threshol
         
         with get_db() as conn:
             with conn.cursor() as cur:
-                cur.execute("""
+                # Build WHERE clause with optional content type filter
+                where_conditions = ["e.embedding <=> %s::vector < %s"]
+                params = [
+                    query_embedding.tolist(),
+                    query_embedding.tolist(), 
+                    1 - threshold,  # Convert similarity threshold to distance
+                    limit, skip
+                ]
+                
+                if content_types and len(content_types) > 0:
+                    # Filter for multiple content types
+                    type_placeholders = ','.join(['%s'] * len(content_types))
+                    where_conditions.append(f"i.type = ANY(ARRAY[{type_placeholders}])")
+                    for content_type in content_types:
+                        params.insert(-2, content_type)  # Insert before limit and skip
+                
+                where_clause = " AND ".join(where_conditions)
+                
+                cur.execute(f"""
                     SELECT 
                         i.id, i.user_id, i.type, i.title, i.url, i.raw_content, i.tags, i.s3_key, i.created_at,
                         1 - (e.embedding <=> %s::vector) as similarity_score
                     FROM items i
                     JOIN embeddings e ON i.id = e.item_id
-                    WHERE e.embedding <=> %s::vector < %s
+                    WHERE {where_clause}
                     ORDER BY similarity_score DESC
                     LIMIT %s OFFSET %s
-                """, (
-                    query_embedding.tolist(),
-                    query_embedding.tolist(), 
-                    1 - threshold,  # Convert similarity threshold to distance
-                    limit, skip
-                ))
+                """, params)
                 results = cur.fetchall()
         
         return [
@@ -392,6 +433,101 @@ async def semantic_search_items(q: str, skip: int = 0, limit: int = 10, threshol
     except Exception as e:
         logger.error(f"Semantic search failed: {e}")
         raise HTTPException(status_code=500, detail=f"Semantic search failed: {str(e)}")
+
+@app.post("/api/smart-search")
+async def iterative_smart_search(q: str, skip: int = 0, limit: int = 10, user_content_type: Optional[str] = None):
+    """Iterative smart search using Claude with 2-attempt refinement."""
+    try:
+        logger.info(f"Starting iterative smart search for query: '{q}'")
+        
+        # Step 1: Initial Claude analysis
+        claude_service = get_claude_service()
+        initial_analysis = await claude_service.analyze_search_query(q)
+        logger.info(f"Initial Claude analysis: {initial_analysis}")
+        
+        # Use user content type or Claude's suggestion
+        content_type = user_content_type if user_content_type and user_content_type != 'any' else initial_analysis.get('contentType', 'any')
+        
+        # Step 2: Execute first search attempt
+        search_terms = ' '.join(initial_analysis.get('enhancedTerms', [q]))
+        search_mode = initial_analysis.get('searchMode', 'hybrid')
+        
+        logger.info(f"First search attempt - Mode: {search_mode}, Terms: '{search_terms}', Content Type: {content_type}")
+        
+        if search_mode == 'semantic':
+            first_results = await semantic_search_items(search_terms, skip, limit, 0.2, content_type)
+        elif search_mode == 'text':
+            first_results = await search_items(search_terms, skip, limit, False, content_type)
+        else:  # hybrid
+            first_results = await search_items(search_terms, skip, limit, True, content_type)
+        
+        # Step 3: Claude evaluates first results
+        # Convert results to dict format for Claude evaluation
+        results_for_evaluation = []
+        for result in first_results:
+            if isinstance(result, dict):
+                results_for_evaluation.append(result)
+            else:
+                # Convert Pydantic model to dict
+                result_dict = result.dict() if hasattr(result, 'dict') else result.__dict__
+                results_for_evaluation.append(result_dict)
+        
+        first_evaluation = await claude_service.evaluate_search_results(q, results_for_evaluation, 1)
+        logger.info(f"First evaluation: {first_evaluation}")
+        
+        # Step 4: If Claude is satisfied, return first results
+        if first_evaluation.get('satisfied', False):
+            logger.info("Claude satisfied with first attempt results")
+            return first_results
+        
+        # Step 5: Claude refines search strategy
+        logger.info("Claude not satisfied, attempting refinement")
+        refinement = await claude_service.refine_search_strategy(q, first_evaluation, initial_analysis)
+        logger.info(f"Refinement strategy: {refinement}")
+        
+        # Step 6: Execute second search attempt with refinement
+        refined_terms = ' '.join(refinement.get('enhancedTerms', [q]))
+        refined_mode = refinement.get('searchMode', 'hybrid')
+        refined_content_type = user_content_type if user_content_type and user_content_type != 'any' else refinement.get('contentType', 'any')
+        refined_threshold = refinement.get('threshold', 0.2)
+        
+        logger.info(f"Second search attempt - Mode: {refined_mode}, Terms: '{refined_terms}', Content Type: {refined_content_type}, Threshold: {refined_threshold}")
+        
+        if refined_mode == 'semantic':
+            second_results = await semantic_search_items(refined_terms, skip, limit, refined_threshold, refined_content_type)
+        elif refined_mode == 'text':
+            second_results = await search_items(refined_terms, skip, limit, False, refined_content_type)
+        else:  # hybrid
+            second_results = await search_items(refined_terms, skip, limit, True, refined_content_type)
+        
+        # Step 7: Claude evaluates second results
+        results_for_evaluation_2 = []
+        for result in second_results:
+            if isinstance(result, dict):
+                results_for_evaluation_2.append(result)
+            else:
+                result_dict = result.dict() if hasattr(result, 'dict') else result.__dict__
+                results_for_evaluation_2.append(result_dict)
+        
+        second_evaluation = await claude_service.evaluate_search_results(q, results_for_evaluation_2, 2)
+        logger.info(f"Second evaluation: {second_evaluation}")
+        
+        # Step 8: Final decision - return second results if satisfied, otherwise first results
+        if second_evaluation.get('satisfied', False):
+            logger.info("Claude satisfied with second attempt, returning refined results")
+            return second_results
+        else:
+            logger.info("Claude not satisfied with second attempt, falling back to hybrid search")
+            # Fall back to simple hybrid search as final option
+            fallback_results = await search_items(q, skip, limit, True, user_content_type)
+            logger.info(f"Returning fallback hybrid search results: {len(fallback_results)} items")
+            return fallback_results
+            
+    except Exception as e:
+        logger.error(f"Iterative smart search failed: {e}")
+        # Fall back to regular hybrid search
+        logger.info("Falling back to regular hybrid search due to error")
+        return await search_items(q, skip, limit, True, user_content_type)
 
 async def claude_enhance_item(item_id: str, item_type: str, title: str, url: str, raw_content: str, s3_key: Optional[str]):
     """Background task to enhance item with Claude-generated tags."""
@@ -461,7 +597,7 @@ async def analyze_search_query(query: str):
         # Return default analysis if Claude fails
         return {
             "searchMode": "hybrid",
-            "contentType": "any",
+            "contentTypes": ["any"],
             "enhancedTerms": [query],
             "reasoning": "Claude analysis failed, using default hybrid search"
         }

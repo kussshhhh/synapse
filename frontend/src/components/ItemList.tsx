@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { getItems, searchItems, semanticSearchItems, type SemanticSearchResult } from '../api';
+import { getItems, searchItems, semanticSearchItems, smartSearch, type SemanticSearchResult } from '../api';
 import type { Item } from '../types';
 
 interface ItemListProps {
@@ -12,12 +12,13 @@ export default function ItemList({ refresh, onRefreshComplete }: ItemListProps) 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
-  const [searchMode, setSearchMode] = useState<'hybrid' | 'semantic' | 'text'>('hybrid');
+  const [searchMode, setSearchMode] = useState<'smart' | 'hybrid' | 'semantic' | 'text'>('smart');
+  const [contentTypeFilters, setContentTypeFilters] = useState<string[]>(['any']);
   const [currentPage, setCurrentPage] = useState(1);
   const [hasMore, setHasMore] = useState(true);
   const itemsPerPage = 10;
 
-  const loadItems = async (query = '', mode = searchMode, page = 1, append = false) => {
+  const loadItems = async (query = '', mode = searchMode, contentTypes = contentTypeFilters, page = 1, append = false) => {
     setLoading(true);
     setError('');
     
@@ -27,13 +28,18 @@ export default function ItemList({ refresh, onRefreshComplete }: ItemListProps) 
       
       if (!query) {
         data = await getItems(skip, itemsPerPage);
+      } else if (mode === 'smart') {
+        // Claude-powered intelligent search with content type influence
+        data = await smartSearch(query, skip, itemsPerPage, contentTypes);
       } else if (mode === 'semantic') {
-        data = await semanticSearchItems(query, skip, itemsPerPage);
+        // Pure semantic search - use user's selected content types only
+        data = await semanticSearchItems(query, skip, itemsPerPage, 0.2, contentTypes);
       } else if (mode === 'text') {
-        data = await searchItems(query, skip, itemsPerPage, false); // semantic=false
+        // Pure text search - use user's selected content types only
+        data = await searchItems(query, skip, itemsPerPage, false, contentTypes); // semantic=false
       } else {
-        // hybrid (default)
-        data = await searchItems(query, skip, itemsPerPage, true); // semantic=true
+        // hybrid (default) - use user's selected content types only
+        data = await searchItems(query, skip, itemsPerPage, true, contentTypes); // semantic=true
       }
       
       setHasMore(data.length === itemsPerPage);
@@ -58,7 +64,8 @@ export default function ItemList({ refresh, onRefreshComplete }: ItemListProps) 
   useEffect(() => {
     if (refresh) {
       setCurrentPage(1);
-      loadItems(searchQuery, searchMode, 1);
+      // Always refresh to latest items (page 1, no append)
+      loadItems(searchQuery, searchMode, contentTypeFilters, 1, false);
       onRefreshComplete?.();
     }
   }, [refresh]);
@@ -66,27 +73,27 @@ export default function ItemList({ refresh, onRefreshComplete }: ItemListProps) 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
     setCurrentPage(1);
-    loadItems(searchQuery, searchMode, 1);
+    loadItems(searchQuery, searchMode, contentTypeFilters, 1);
   };
 
   const handleNextPage = () => {
     if (hasMore && !loading) {
       const nextPage = currentPage + 1;
-      loadItems(searchQuery, searchMode, nextPage);
+      loadItems(searchQuery, searchMode, contentTypeFilters, nextPage);
     }
   };
 
   const handlePrevPage = () => {
     if (currentPage > 1 && !loading) {
       const prevPage = currentPage - 1;
-      loadItems(searchQuery, searchMode, prevPage);
+      loadItems(searchQuery, searchMode, contentTypeFilters, prevPage);
     }
   };
 
   const handleLoadMore = () => {
     if (hasMore && !loading) {
       const nextPage = currentPage + 1;
-      loadItems(searchQuery, searchMode, nextPage, true);
+      loadItems(searchQuery, searchMode, contentTypeFilters, nextPage, true);
       setCurrentPage(nextPage);
     }
   };
@@ -127,7 +134,7 @@ export default function ItemList({ refresh, onRefreshComplete }: ItemListProps) 
               onClick={() => {
                 setSearchQuery('');
                 setCurrentPage(1);
-                loadItems('', searchMode, 1);
+                loadItems('', searchMode, contentTypeFilters, 1);
               }}
             >
               Clear
@@ -135,25 +142,78 @@ export default function ItemList({ refresh, onRefreshComplete }: ItemListProps) 
           )}
         </form>
 
-        {searchQuery && (
-          <div className="search-mode-selector">
-            <label>Search mode:</label>
-            <select 
-              value={searchMode} 
-              onChange={(e) => {
-                const mode = e.target.value as 'hybrid' | 'semantic' | 'text';
-                setSearchMode(mode);
-                setCurrentPage(1);
-                loadItems(searchQuery, mode, 1);
-              }}
-              className="search-mode-select"
-            >
-              <option value="hybrid">🧠 Hybrid (Text + AI)</option>
-              <option value="semantic">🎯 Semantic (AI Only)</option>
-              <option value="text">📝 Text Only</option>
-            </select>
+        <div className="search-controls">
+          {searchQuery && (
+            <div className="search-mode-selector">
+              <label>Search mode:</label>
+              <select 
+                value={searchMode} 
+                onChange={(e) => {
+                  const mode = e.target.value as 'smart' | 'hybrid' | 'semantic' | 'text';
+                  setSearchMode(mode);
+                  setCurrentPage(1);
+                  loadItems(searchQuery, mode, contentTypeFilters, 1);
+                }}
+                className="search-mode-select"
+              >
+                <option value="smart">🤖 Smart (Claude AI)</option>
+                <option value="hybrid">🧠 Hybrid (Text + AI)</option>
+                <option value="semantic">🎯 Semantic (AI Only)</option>
+                <option value="text">📝 Text Only</option>
+              </select>
+            </div>
+          )}
+          
+          <div className="content-type-selector">
+            <label>
+              Content types:
+              {searchMode === 'smart' && searchQuery && (
+                <span className="claude-influence-indicator"> 🤖 (Claude can influence these)</span>
+              )}
+            </label>
+            <div className="content-type-checkboxes">
+              {[
+                { value: 'any', label: '📂 All Types', exclusive: true },
+                { value: 'image', label: '🖼️ Images' },
+                { value: 'url', label: '🔗 URLs' },
+                { value: 'pdf', label: '📄 PDFs' },
+                { value: 'video', label: '🎥 Videos' },
+                { value: 'note', label: '📝 Notes' },
+                { value: 'product', label: '🛒 Products' }
+              ].map((type) => (
+                <label key={type.value} className="content-type-checkbox">
+                  <input
+                    type="checkbox"
+                    checked={contentTypeFilters.includes(type.value)}
+                    onChange={(e) => {
+                      let newFilters;
+                      if (type.exclusive) {
+                        // "All Types" is exclusive - if selected, clear others
+                        newFilters = e.target.checked ? ['any'] : [];
+                      } else {
+                        // Regular type - add/remove from list
+                        if (e.target.checked) {
+                          // Remove "any" if selecting specific types
+                          newFilters = [...contentTypeFilters.filter(f => f !== 'any'), type.value];
+                        } else {
+                          newFilters = contentTypeFilters.filter(f => f !== type.value);
+                        }
+                        // If no types selected, default to "any"
+                        if (newFilters.length === 0) {
+                          newFilters = ['any'];
+                        }
+                      }
+                      setContentTypeFilters(newFilters);
+                      setCurrentPage(1);
+                      loadItems(searchQuery, searchMode, newFilters, 1);
+                    }}
+                  />
+                  <span>{type.label}</span>
+                </label>
+              ))}
+            </div>
           </div>
-        )}
+        </div>
       </div>
 
       {loading && <div className="loading">Loading...</div>}

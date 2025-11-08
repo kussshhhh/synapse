@@ -77,8 +77,21 @@ export async function getItems(skip = 0, limit = 10): Promise<Item[]> {
   return response.json();
 }
 
-export async function searchItems(query: string, skip = 0, limit = 10, semantic = true): Promise<Item[]> {
-  const response = await fetch(`${API_BASE}/api/search?q=${encodeURIComponent(query)}&skip=${skip}&limit=${limit}&semantic=${semantic}`);
+export async function searchItems(query: string, skip = 0, limit = 10, semantic = true, contentTypes?: string[]): Promise<Item[]> {
+  const params = new URLSearchParams({
+    q: query,
+    skip: skip.toString(),
+    limit: limit.toString(),
+    semantic: semantic.toString()
+  });
+  
+  if (contentTypes && contentTypes.length > 0 && !contentTypes.includes('any')) {
+    contentTypes.forEach(type => {
+      params.append('content_types', type);
+    });
+  }
+  
+  const response = await fetch(`${API_BASE}/api/search?${params}`);
   if (!response.ok) throw new Error('Failed to search items');
   return response.json();
 }
@@ -87,8 +100,87 @@ export interface SemanticSearchResult extends Item {
   similarity_score: number;
 }
 
-export async function semanticSearchItems(query: string, skip = 0, limit = 10, threshold = 0.2): Promise<SemanticSearchResult[]> {
-  const response = await fetch(`${API_BASE}/api/semantic-search?q=${encodeURIComponent(query)}&skip=${skip}&limit=${limit}&threshold=${threshold}`);
+export async function semanticSearchItems(query: string, skip = 0, limit = 10, threshold = 0.2, contentTypes?: string[]): Promise<SemanticSearchResult[]> {
+  const params = new URLSearchParams({
+    q: query,
+    skip: skip.toString(),
+    limit: limit.toString(),
+    threshold: threshold.toString()
+  });
+  
+  if (contentTypes && contentTypes.length > 0 && !contentTypes.includes('any')) {
+    contentTypes.forEach(type => {
+      params.append('content_types', type);
+    });
+  }
+  
+  const response = await fetch(`${API_BASE}/api/semantic-search?${params}`);
   if (!response.ok) throw new Error('Failed to perform semantic search');
   return response.json();
+}
+
+// Claude-powered search analysis
+export interface SearchAnalysis {
+  searchMode: 'hybrid' | 'semantic' | 'text';
+  contentType: 'image' | 'url' | 'pdf' | 'video' | 'any';
+  enhancedTerms: string[];
+  reasoning: string;
+}
+
+export async function analyzeSearchQuery(query: string): Promise<SearchAnalysis> {
+  const response = await fetch(`${API_BASE}/api/search/analyze?query=${encodeURIComponent(query)}`, {
+    method: 'POST'
+  });
+  if (!response.ok) throw new Error('Failed to analyze search query');
+  return response.json();
+}
+
+// Smart search that uses Claude analysis for content type suggestions
+export async function smartSearch(query: string, skip = 0, limit = 10, contentTypes?: string[]): Promise<(Item | SemanticSearchResult)[]> {
+  try {
+    // Step 1: Analyze query with Claude to get content type suggestions
+    const analysis = await analyzeSearchQuery(query);
+    console.log('Claude analysis:', analysis);
+    
+    // Step 2: Use Claude's suggestions if no user selection, otherwise respect user choice
+    let finalContentTypes = contentTypes;
+    if (!contentTypes || contentTypes.length === 0 || contentTypes.includes('any')) {
+      // Claude suggests multiple content types to include
+      finalContentTypes = analysis.contentTypes && analysis.contentTypes.length > 0 ? analysis.contentTypes : ['any'];
+    }
+    
+    // Step 3: Execute search with content type filtering  
+    // Try each enhanced term individually and combine results
+    let allResults: (Item | SemanticSearchResult)[] = [];
+    
+    for (const term of analysis.enhancedTerms) {
+      let termResults: (Item | SemanticSearchResult)[] = [];
+      
+      if (analysis.searchMode === 'semantic') {
+        termResults = await semanticSearchItems(term, 0, limit, 0.2, finalContentTypes);
+      } else if (analysis.searchMode === 'text') {
+        termResults = await searchItems(term, 0, limit, false, finalContentTypes);
+      } else {
+        // hybrid
+        termResults = await searchItems(term, 0, limit, true, finalContentTypes);
+      }
+      
+      // Add results, avoiding duplicates
+      for (const result of termResults) {
+        if (!allResults.find(r => r.id === result.id)) {
+          allResults.push(result);
+        }
+      }
+      
+      // Stop if we have enough results
+      if (allResults.length >= limit) break;
+    }
+    
+    // Apply skip and limit to final results
+    return allResults.slice(skip, skip + limit);
+  } catch (error) {
+    console.error('Smart search failed, falling back to hybrid:', error);
+    // Fallback to regular hybrid search
+    return await searchItems(query, skip, limit, true, contentTypes);
+  }
 }

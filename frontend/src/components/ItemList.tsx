@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { getItems, searchItems } from '../api';
+import { getItems, searchItems, semanticSearchItems, type SemanticSearchResult } from '../api';
 import type { Item } from '../types';
 
 interface ItemListProps {
@@ -8,17 +8,28 @@ interface ItemListProps {
 }
 
 export default function ItemList({ refresh, onRefreshComplete }: ItemListProps) {
-  const [items, setItems] = useState<Item[]>([]);
+  const [items, setItems] = useState<(Item | SemanticSearchResult)[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
+  const [searchMode, setSearchMode] = useState<'hybrid' | 'semantic' | 'text'>('hybrid');
 
-  const loadItems = async (query = '') => {
+  const loadItems = async (query = '', mode = searchMode) => {
     setLoading(true);
     setError('');
     
     try {
-      const data = query ? await searchItems(query) : await getItems();
+      let data;
+      if (!query) {
+        data = await getItems();
+      } else if (mode === 'semantic') {
+        data = await semanticSearchItems(query);
+      } else if (mode === 'text') {
+        data = await searchItems(query, 0, 10, false); // semantic=false
+      } else {
+        // hybrid (default)
+        data = await searchItems(query, 0, 10, true); // semantic=true
+      }
       setItems(data);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load items');
@@ -40,7 +51,7 @@ export default function ItemList({ refresh, onRefreshComplete }: ItemListProps) 
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
-    loadItems(searchQuery);
+    loadItems(searchQuery, searchMode);
   };
 
   const formatDate = (dateString: string) => {
@@ -63,6 +74,7 @@ export default function ItemList({ refresh, onRefreshComplete }: ItemListProps) 
     <div className="item-list">
       <div className="search-section">
         <h2>Your Items</h2>
+        
         <form onSubmit={handleSearch} className="search-form">
           <input
             type="text"
@@ -84,6 +96,25 @@ export default function ItemList({ refresh, onRefreshComplete }: ItemListProps) 
             </button>
           )}
         </form>
+
+        {searchQuery && (
+          <div className="search-mode-selector">
+            <label>Search mode:</label>
+            <select 
+              value={searchMode} 
+              onChange={(e) => {
+                const mode = e.target.value as 'hybrid' | 'semantic' | 'text';
+                setSearchMode(mode);
+                loadItems(searchQuery, mode);
+              }}
+              className="search-mode-select"
+            >
+              <option value="hybrid">🧠 Hybrid (Text + AI)</option>
+              <option value="semantic">🎯 Semantic (AI Only)</option>
+              <option value="text">📝 Text Only</option>
+            </select>
+          </div>
+        )}
       </div>
 
       {loading && <div className="loading">Loading...</div>}
@@ -105,7 +136,14 @@ export default function ItemList({ refresh, onRefreshComplete }: ItemListProps) 
               >
                 {item.type}
               </span>
-              <span className="item-date">{formatDate(item.created_at)}</span>
+              <div className="item-header-right">
+                {'similarity_score' in item && (
+                  <span className="similarity-score">
+                    {Math.round(item.similarity_score * 100)}% match
+                  </span>
+                )}
+                <span className="item-date">{formatDate(item.created_at)}</span>
+              </div>
             </div>
             
             <div className="item-content">

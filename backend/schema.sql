@@ -30,8 +30,8 @@ CREATE TABLE IF NOT EXISTS items (
 CREATE TABLE IF NOT EXISTS embeddings (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     item_id UUID UNIQUE NOT NULL REFERENCES items(id) ON DELETE CASCADE,
-    embedding vector(384),
-    model_version TEXT NOT NULL DEFAULT 'all-MiniLM-L6-v2',
+    embedding vector(512),
+    model_version TEXT NOT NULL DEFAULT 'clip-vit-base-patch32',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 

@@ -5,13 +5,20 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "beautifulsoup4>=4.14.2",
     "boto3>=1.40.69",
     "fastapi[cors]>=0.121.0",
+    "opencv-python>=4.12.0.88",
     "pgvector>=0.4.1",
+    "pillow>=12.0.0",
     "psycopg2-binary>=2.9.11",
     "pydantic>=2.12.4",
     "pydantic-settings>=2.11.0",
+    "pypdf2>=3.0.1",
     "python-dotenv>=1.2.1",
     "python-multipart>=0.0.20",
+    "torch>=2.9.0",
+    "torchvision>=0.24.0",
+    "transformers>=4.57.1",
     "uvicorn[standard]>=0.38.0",
 ]

@@ -77,8 +77,18 @@ export async function getItems(skip = 0, limit = 10): Promise<Item[]> {
   return response.json();
 }
 
-export async function searchItems(query: string, skip = 0, limit = 10): Promise<Item[]> {
-  const response = await fetch(`${API_BASE}/api/search?q=${encodeURIComponent(query)}&skip=${skip}&limit=${limit}`);
+export async function searchItems(query: string, skip = 0, limit = 10, semantic = true): Promise<Item[]> {
+  const response = await fetch(`${API_BASE}/api/search?q=${encodeURIComponent(query)}&skip=${skip}&limit=${limit}&semantic=${semantic}`);
   if (!response.ok) throw new Error('Failed to search items');
+  return response.json();
+}
+
+export interface SemanticSearchResult extends Item {
+  similarity_score: number;
+}
+
+export async function semanticSearchItems(query: string, skip = 0, limit = 10, threshold = 0.2): Promise<SemanticSearchResult[]> {
+  const response = await fetch(`${API_BASE}/api/semantic-search?q=${encodeURIComponent(query)}&skip=${skip}&limit=${limit}&threshold=${threshold}`);
+  if (!response.ok) throw new Error('Failed to perform semantic search');
   return response.json();
 }

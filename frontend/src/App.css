@@ -156,6 +156,12 @@ button:disabled {
   margin-bottom: 0.75rem;
 }
 
+.item-header-right {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
 .item-type {
   padding: 0.25rem 0.5rem;
   border-radius: 12px;
@@ -231,6 +237,38 @@ button:disabled {
   text-align: center;
   padding: 1rem;
   color: #666;
+}
+
+/* Search mode selector */
+.search-mode-selector {
+  margin-top: 0.75rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 14px;
+}
+
+.search-mode-selector label {
+  color: #555;
+  font-weight: 500;
+}
+
+.search-mode-select {
+  padding: 0.375rem 0.5rem;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  background: white;
+  font-size: 14px;
+}
+
+/* Similarity score */
+.similarity-score {
+  background: #e3f2fd;
+  color: #1565c0;
+  padding: 0.125rem 0.375rem;
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 500;
 }
 
 @media (max-width: 768px) {

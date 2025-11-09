@@ -1,15 +1,17 @@
-# 🧠 Synapse
+# Synapse
 
 Your intelligent second brain - store, search, and discover content across images, URLs, documents, and notes with AI-powered multimodal search.
 
+the fundamental idea is to create a core service with apis and postgres db and expose those apis to interact with many interfaces (website, browser extension, llm, mobile app)
+
 ## Features
 
-- **Multimodal Storage**: Images, URLs, PDFs, videos, notes, products
+- **Multimodal Storage**: Images, URLs, PDFs, videos, notes, products.
 - **AI-Powered Search**: Claude analyzes your queries and suggests optimal search strategies
 - **Smart Content Types**: Automatic filtering based on what you're looking for
 - **Semantic + Text Search**: CLIP embeddings + traditional text matching
 - **Browser Extension**: One-click saving with floating UI
-- **Auto-Tagging**: Claude generates smart tags for uploaded content
+- **Auto-Tagging**: Claude generates smart tags for uploaded content in the background so when you upload smth it gets saved instantaneously but the tags are processed in the background and later added for better search.
 
 ## Quick Start
 
@@ -137,16 +139,16 @@ graph TB
 
 ## Search Modes
 
-- **🤖 Smart (Claude AI)**: Claude analyzes your query and chooses the best approach
-- **🧠 Hybrid**: Combines text matching with semantic similarity  
-- **🎯 Semantic**: Pure AI similarity search using CLIP embeddings
-- **📝 Text**: Traditional keyword matching
+- **Smart (Claude AI)**: Claude analyzes your query and chooses the best approach
+- **Hybrid**: Combines text matching with semantic similarity  
+- **Semantic**: Pure AI similarity search using CLIP embeddings
+- **Text**: Traditional keyword matching
 
 ## Tech Stack
 
 - **Backend**: FastAPI + PostgreSQL + pgvector
 - **Frontend**: React + TypeScript + Vite
-- **AI**: Claude (LiteLLM) + CLIP embeddings
+- **AI**: Claude + CLIP embeddings
 - **Storage**: S3-compatible (LocalStack for dev)
 
 ## Environment Setup
@@ -165,4 +167,4 @@ DEBUG=true
 3. **Smart Search**: Multi-term OR search with intelligent content type filtering
 4. **Results**: Ranked by relevance with similarity scores
 
-Built for speed, intelligence, and discovery. 🚀
+Built for speed, intelligence, and discovery.

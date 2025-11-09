@@ -29,6 +29,112 @@ npm install && npm run dev
 1. Load `browser-extension/` as unpacked extension in Chrome
 2. Drag images or click the floating save button
 
+### HLD (high level design)
+
+```mermaid
+graph TB
+    subgraph CLIENT["CLIENT LAYER"]
+        EXT[Browser Extension]
+        WEB[Web Application]
+        MOB[Mobile Apps Future]
+    end
+
+    subgraph API["API LAYER - FastAPI Backend"]
+        UPLOAD[POST /api/items - Upload Content]
+        SEARCH[GET /api/search - Main Search]
+        SEMANTIC[GET /api/semantic-search - Vector Only]
+        ANALYZE[POST /api/search/analyze - Claude Query Analysis]
+        ITEMS[GET /api/items - List Items]
+        USERS[User Management APIs]
+    end
+
+    subgraph MODES["SEARCH MODES"]
+        TMODE[Text Mode - SQL ILIKE matching]
+        SMODE[Semantic Mode - Vector similarity only]
+        HMODE[Hybrid Mode - Text + Vector combined]
+        SMARTMODE[Smart Mode - Claude powered decision]
+    end
+
+    subgraph INTEL["INTELLIGENCE LAYER"]
+        direction TB
+        
+        subgraph CLAUDE["Claude Integration via LiteLLM"]
+            QUERY_ANALYSIS[Query Analysis Function]
+            TAG_GEN[Tag Generation Function]
+        end
+        
+        subgraph PROCESS["Processing Services"]
+            CLIP[CLIP Embeddings Service]
+            EXTRACT[Content Extractors OCR PDF Web]
+        end
+    end
+
+    subgraph DATA["DATA LAYER"]
+        POSTGRES[PostgreSQL with pgvector]
+        S3[S3 Storage LocalStack]
+    end
+
+    subgraph TABLES["Database Tables"]
+        TUSERS[users]
+        TITEMS[items - with tags array]
+        TEMBED[embeddings - vector 512]
+    end
+
+    %% Client to API
+    EXT --> UPLOAD
+    EXT --> SEARCH
+    WEB --> UPLOAD
+    WEB --> SEARCH
+    WEB --> ITEMS
+    
+    %% Search Flow
+    SEARCH --> SMARTMODE
+    SEARCH --> HMODE
+    SEARCH --> TMODE
+    SEMANTIC --> SMODE
+    
+    %% Smart Mode Flow - Claude stays in backend
+    SMARTMODE --> QUERY_ANALYSIS
+    QUERY_ANALYSIS --> HMODE
+    
+    %% Upload Flow
+    UPLOAD --> EXTRACT
+    EXTRACT --> S3
+    EXTRACT --> CLIP
+    CLIP --> TEMBED
+    UPLOAD --> TITEMS
+    
+    %% Background Enhancement
+    TITEMS -.-> TAG_GEN
+    TAG_GEN -.-> TITEMS
+    
+    %% Search Modes to Data
+    TMODE --> TITEMS
+    SMODE --> TEMBED
+    HMODE --> TITEMS
+    HMODE --> TEMBED
+    
+    %% Database relationships
+    POSTGRES --> TUSERS
+    POSTGRES --> TITEMS
+    POSTGRES --> TEMBED
+    S3 --> TITEMS
+
+    classDef clientStyle fill:#DBEAFE,stroke:#3B82F6,stroke-width:3px
+    classDef apiStyle fill:#D1FAE5,stroke:#10B981,stroke-width:3px
+    classDef modeStyle fill:#FEF3C7,stroke:#F59E0B,stroke-width:3px
+    classDef claudeStyle fill:#FECACA,stroke:#EF4444,stroke-width:4px
+    classDef processStyle fill:#E9D5FF,stroke:#A855F7,stroke-width:3px
+    classDef dataStyle fill:#FFEDD5,stroke:#F97316,stroke-width:3px
+
+    class EXT,WEB,MOB clientStyle
+    class UPLOAD,SEARCH,SEMANTIC,ANALYZE,ITEMS,USERS apiStyle
+    class TMODE,SMODE,HMODE,SMARTMODE modeStyle
+    class QUERY_ANALYSIS,TAG_GEN claudeStyle
+    class CLIP,EXTRACT processStyle
+    class POSTGRES,S3,TUSERS,TITEMS,TEMBED dataStyle
+```
+
 ## Search Modes
 
 - **🤖 Smart (Claude AI)**: Claude analyzes your query and chooses the best approach

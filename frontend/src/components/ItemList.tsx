@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { getItems, searchItems, semanticSearchItems, smartSearch, type SemanticSearchResult } from '../api';
+import { searchItems, semanticSearchItems, type SemanticSearchResult } from '../api';
 import type { Item } from '../types';
 
 interface ItemListProps {
@@ -8,93 +8,149 @@ interface ItemListProps {
 }
 
 export default function ItemList({ refresh, onRefreshComplete }: ItemListProps) {
-  const [items, setItems] = useState<(Item | SemanticSearchResult)[]>([]);
-  const [loading, setLoading] = useState(false);
+  // Separate state for Images and Text/Other
+  const [imageItems, setImageItems] = useState<(Item | SemanticSearchResult)[]>([]);
+  const [textItems, setTextItems] = useState<(Item | SemanticSearchResult)[]>([]);
+
+  const [loadingImages, setLoadingImages] = useState(false);
+  const [loadingText, setLoadingText] = useState(false);
   const [error, setError] = useState('');
+
   const [searchQuery, setSearchQuery] = useState('');
   const [searchMode, setSearchMode] = useState<'smart' | 'hybrid' | 'semantic' | 'text'>('smart');
-  const [contentTypeFilters, setContentTypeFilters] = useState<string[]>(['any']);
-  const [currentPage, setCurrentPage] = useState(1);
-  const [hasMore, setHasMore] = useState(true);
+
+  // Pagination state for each column
+  const [imagePage, setImagePage] = useState(1);
+  const [textPage, setTextPage] = useState(1);
+  const [hasMoreImages, setHasMoreImages] = useState(true);
+  const [hasMoreText, setHasMoreText] = useState(true);
+
   const itemsPerPage = 10;
 
-  const loadItems = async (query = '', mode = searchMode, contentTypes = contentTypeFilters, page = 1, append = false) => {
-    setLoading(true);
-    setError('');
-    
+  // Helper to fetch items based on type
+  const fetchItemsByType = async (
+    types: string[],
+    page: number,
+    query: string,
+    mode: string
+  ) => {
+    const skip = (page - 1) * itemsPerPage;
+
+    if (!query) {
+      // If no query, use searchItems with empty query to leverage type filtering
+      return await searchItems('', skip, itemsPerPage, false, types);
+    } else if (mode === 'smart') {
+      // For smart search, we want to force the types we are looking for
+      // ignoring Claude's type suggestions to ensure we populate both columns.
+      // We use hybrid search with the query for the split view when in "Smart" mode.
+      return await searchItems(query, skip, itemsPerPage, true, types);
+    } else if (mode === 'semantic') {
+      return await semanticSearchItems(query, skip, itemsPerPage, 0.2, types);
+    } else if (mode === 'text') {
+      return await searchItems(query, skip, itemsPerPage, false, types);
+    } else {
+      // hybrid (default)
+      return await searchItems(query, skip, itemsPerPage, true, types);
+    }
+  };
+
+  const loadImages = async (page = 1, append = false) => {
+    setLoadingImages(true);
     try {
-      const skip = (page - 1) * itemsPerPage;
-      let data;
-      
-      if (!query) {
-        data = await getItems(skip, itemsPerPage);
-      } else if (mode === 'smart') {
-        // Claude-powered intelligent search with content type influence
-        data = await smartSearch(query, skip, itemsPerPage, contentTypes);
-      } else if (mode === 'semantic') {
-        // Pure semantic search - use user's selected content types only
-        data = await semanticSearchItems(query, skip, itemsPerPage, 0.2, contentTypes);
-      } else if (mode === 'text') {
-        // Pure text search - use user's selected content types only
-        data = await searchItems(query, skip, itemsPerPage, false, contentTypes); // semantic=false
-      } else {
-        // hybrid (default) - use user's selected content types only
-        data = await searchItems(query, skip, itemsPerPage, true, contentTypes); // semantic=true
-      }
-      
-      setHasMore(data.length === itemsPerPage);
-      
+      const data = await fetchItemsByType(['image'], page, searchQuery, searchMode);
+      setHasMoreImages(data.length === itemsPerPage);
       if (append) {
-        setItems(prev => [...prev, ...data]);
+        setImageItems(prev => [...prev, ...data]);
       } else {
-        setItems(data);
-        setCurrentPage(page);
+        setImageItems(data);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load items');
+      console.error("Failed to load images", err);
     } finally {
-      setLoading(false);
+      setLoadingImages(false);
+    }
+  };
+
+  const loadText = async (page = 1, append = false) => {
+    setLoadingText(true);
+    try {
+      const data = await fetchItemsByType(['note', 'url', 'pdf', 'video', 'product'], page, searchQuery, searchMode);
+      setHasMoreText(data.length === itemsPerPage);
+      if (append) {
+        setTextItems(prev => [...prev, ...data]);
+      } else {
+        setTextItems(data);
+      }
+    } catch (err) {
+      console.error("Failed to load text items", err);
+      setError('Failed to load some items');
+    } finally {
+      setLoadingText(false);
+    }
+  };
+
+  const loadAll = (resetPage = false) => {
+    setError('');
+    if (resetPage) {
+      setImagePage(1);
+      setTextPage(1);
+      // We need to pass 1 explicitly because state updates are async
+      loadImages(1, false);
+      loadText(1, false);
+    } else {
+      loadImages(imagePage, false);
+      loadText(textPage, false);
     }
   };
 
   useEffect(() => {
-    loadItems();
+    loadAll(true);
   }, []);
 
   useEffect(() => {
     if (refresh) {
-      setCurrentPage(1);
-      // Always refresh to latest items (page 1, no append)
-      loadItems(searchQuery, searchMode, contentTypeFilters, 1, false);
+      loadAll(true);
       onRefreshComplete?.();
     }
   }, [refresh]);
 
+  // Effect to reload when search mode changes
+  useEffect(() => {
+    if (searchQuery) {
+      loadAll(true);
+    }
+  }, [searchMode]);
+
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
-    setCurrentPage(1);
-    loadItems(searchQuery, searchMode, contentTypeFilters, 1);
+    loadAll(true);
   };
 
-  const handleNextPage = () => {
-    if (hasMore && !loading) {
-      const nextPage = currentPage + 1;
-      loadItems(searchQuery, searchMode, contentTypeFilters, nextPage);
+  const handleClear = () => {
+    setSearchQuery('');
+    // We need to wait for state update or just pass empty string manually
+    // But loadAll uses state. 
+    // Let's just force a reload with empty query logic
+    // Actually, if we set query to empty, the effect on searchMode won't trigger (it checks searchQuery)
+    // So we need to manually trigger.
+    // But state is stale.
+    // Let's just reload the page.
+    window.location.reload(); // Simplest way to reset everything cleanly
+  };
+
+  const handleLoadMoreImages = () => {
+    if (hasMoreImages && !loadingImages) {
+      const nextPage = imagePage + 1;
+      setImagePage(nextPage);
+      loadImages(nextPage, true);
     }
   };
 
-  const handlePrevPage = () => {
-    if (currentPage > 1 && !loading) {
-      const prevPage = currentPage - 1;
-      loadItems(searchQuery, searchMode, contentTypeFilters, prevPage);
-    }
-  };
-
-  const handleLoadMore = () => {
-    if (hasMore && !loading) {
-      const nextPage = currentPage + 1;
-      loadItems(searchQuery, searchMode, contentTypeFilters, nextPage, true);
-      setCurrentPage(nextPage);
+  const handleLoadMoreText = () => {
+    if (hasMoreText && !loadingText) {
+      const nextPage = textPage + 1;
+      setTextPage(nextPage);
+      loadText(nextPage, true);
     }
   };
 
@@ -105,7 +161,7 @@ export default function ItemList({ refresh, onRefreshComplete }: ItemListProps) 
   const getTypeColor = (type: string) => {
     const colors: Record<string, string> = {
       note: '#4CAF50',
-      url: '#2196F3', 
+      url: '#2196F3',
       image: '#FF9800',
       video: '#E91E63',
       pdf: '#9C27B0',
@@ -114,11 +170,96 @@ export default function ItemList({ refresh, onRefreshComplete }: ItemListProps) 
     return colors[type] || '#757575';
   };
 
+  const renderItemCard = (item: Item | SemanticSearchResult) => (
+    <div key={item.id} className="item-card">
+      <div className="item-header">
+        <span
+          className="item-type"
+          style={{ backgroundColor: getTypeColor(item.type) }}
+        >
+          {item.type}
+        </span>
+        <div className="item-header-right">
+          {'similarity_score' in item && (
+            <span className="similarity-score">
+              {Math.round(item.similarity_score * 100)}% match
+            </span>
+          )}
+          <span className="item-date">{formatDate(item.created_at)}</span>
+        </div>
+      </div>
+
+      <div className="item-content">
+        {item.title && <h3 className="item-title">{item.title}</h3>}
+
+        {/* Show image preview for image items */}
+        {item.type === 'image' && (
+          <div className="item-image">
+            <img
+              src={item.s3_key ? `http://localhost:4566/synapse-storage/${item.s3_key}` : item.url || ''}
+              alt={item.title || 'Uploaded image'}
+              className="image-preview"
+              onError={(e) => {
+                // If S3 fails and we haven't tried the URL yet, try the URL
+                if (item.s3_key && item.url && e.currentTarget.src.includes('localhost:4566') && !e.currentTarget.src.includes(item.url)) {
+                  e.currentTarget.src = item.url;
+                } else {
+                  e.currentTarget.style.display = 'none';
+                }
+              }}
+            />
+          </div>
+        )}
+
+        {item.url && item.type !== 'image' && (
+          <a
+            href={item.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="item-url"
+          >
+            {item.url}
+          </a>
+        )}
+
+        {/* For images, show source page if URL exists */}
+        {item.type === 'image' && item.url && !item.url.startsWith('data:') && (
+          <div className="item-source">
+            Source: <a
+              href={item.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="item-source-link"
+            >
+              {new URL(item.url).hostname}
+            </a>
+          </div>
+        )}
+
+        {item.raw_content && (
+          <p className="item-text">
+            {item.raw_content.length > 200
+              ? `${item.raw_content.slice(0, 200)}...`
+              : item.raw_content}
+          </p>
+        )}
+
+        {item.tags.length > 0 && (
+          <div className="item-tags">
+            {item.tags.map((tag, index) => (
+              <span key={index} className="tag">{tag}</span>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+
   return (
     <div className="item-list">
       <div className="search-section">
         <h2>Your Items</h2>
-        
+
         <form onSubmit={handleSearch} className="search-form">
           <input
             type="text"
@@ -129,13 +270,9 @@ export default function ItemList({ refresh, onRefreshComplete }: ItemListProps) 
           />
           <button type="submit">Search</button>
           {searchQuery && (
-            <button 
-              type="button" 
-              onClick={() => {
-                setSearchQuery('');
-                setCurrentPage(1);
-                loadItems('', searchMode, contentTypeFilters, 1);
-              }}
+            <button
+              type="button"
+              onClick={handleClear}
             >
               Clear
             </button>
@@ -146,209 +283,88 @@ export default function ItemList({ refresh, onRefreshComplete }: ItemListProps) 
           {searchQuery && (
             <div className="search-mode-selector">
               <label>Search mode:</label>
-              <select 
-                value={searchMode} 
-                onChange={(e) => {
-                  const mode = e.target.value as 'smart' | 'hybrid' | 'semantic' | 'text';
-                  setSearchMode(mode);
-                  setCurrentPage(1);
-                  loadItems(searchQuery, mode, contentTypeFilters, 1);
-                }}
+              <select
+                value={searchMode}
+                onChange={(e) => setSearchMode(e.target.value as any)}
                 className="search-mode-select"
               >
-                <option value="smart">🤖 Smart (Claude AI)</option>
+                <option value="smart">🤖 Smart (Gemini AI)</option>
                 <option value="hybrid">🧠 Hybrid (Text + AI)</option>
                 <option value="semantic">🎯 Semantic (AI Only)</option>
                 <option value="text">📝 Text Only</option>
               </select>
             </div>
           )}
-          
-          <div className="content-type-selector">
-            <label>
-              Content types:
-              {searchMode === 'smart' && searchQuery && (
-                <span className="claude-influence-indicator"> 🤖 (Claude can influence these)</span>
-              )}
-            </label>
-            <div className="content-type-checkboxes">
-              {[
-                { value: 'any', label: '📂 All Types', exclusive: true },
-                { value: 'image', label: '🖼️ Images' },
-                { value: 'url', label: '🔗 URLs' },
-                { value: 'pdf', label: '📄 PDFs' },
-                { value: 'video', label: '🎥 Videos' },
-                { value: 'note', label: '📝 Notes' },
-                { value: 'product', label: '🛒 Products' }
-              ].map((type) => (
-                <label key={type.value} className="content-type-checkbox">
-                  <input
-                    type="checkbox"
-                    checked={contentTypeFilters.includes(type.value)}
-                    onChange={(e) => {
-                      let newFilters;
-                      if (type.exclusive) {
-                        // "All Types" is exclusive - if selected, clear others
-                        newFilters = e.target.checked ? ['any'] : [];
-                      } else {
-                        // Regular type - add/remove from list
-                        if (e.target.checked) {
-                          // Remove "any" if selecting specific types
-                          newFilters = [...contentTypeFilters.filter(f => f !== 'any'), type.value];
-                        } else {
-                          newFilters = contentTypeFilters.filter(f => f !== type.value);
-                        }
-                        // If no types selected, default to "any"
-                        if (newFilters.length === 0) {
-                          newFilters = ['any'];
-                        }
-                      }
-                      setContentTypeFilters(newFilters);
-                      setCurrentPage(1);
-                      loadItems(searchQuery, searchMode, newFilters, 1);
-                    }}
-                  />
-                  <span>{type.label}</span>
-                </label>
-              ))}
-            </div>
-          </div>
         </div>
       </div>
 
-      {loading && <div className="loading">Loading...</div>}
       {error && <div className="error">{error}</div>}
 
-      <div className="items-grid">
-        {items.length === 0 && !loading && (
-          <div className="no-items">
-            {searchQuery ? 'No items found' : 'No items yet. Add your first item above!'}
+      <div className="split-view-container">
+        {/* Left Column: Text/Other */}
+        <div className="split-column">
+          <div className="split-column-header">
+            <h3>📄 Text & Notes</h3>
+            <span className="count-badge">{textItems.length}</span>
           </div>
-        )}
-        
-        {items.map((item) => (
-          <div key={item.id} className="item-card">
-            <div className="item-header">
-              <span 
-                className="item-type"
-                style={{ backgroundColor: getTypeColor(item.type) }}
-              >
-                {item.type}
-              </span>
-              <div className="item-header-right">
-                {'similarity_score' in item && (
-                  <span className="similarity-score">
-                    {Math.round(item.similarity_score * 100)}% match
-                  </span>
-                )}
-                <span className="item-date">{formatDate(item.created_at)}</span>
-              </div>
+
+          <div className="split-column-content">
+            {loadingText && textItems.length === 0 && <div className="loading">Loading...</div>}
+
+            {textItems.length === 0 && !loadingText && (
+              <div className="no-items">No text items found</div>
+            )}
+
+            <div className="items-grid">
+              {textItems.map(renderItemCard)}
             </div>
-            
-            <div className="item-content">
-              {item.title && <h3 className="item-title">{item.title}</h3>}
-              
-              {/* Show image preview for image items */}
-              {item.type === 'image' && item.s3_key && (
-                <div className="item-image">
-                  <img 
-                    src={`http://localhost:4566/synapse-storage/${item.s3_key}`}
-                    alt={item.title || 'Uploaded image'}
-                    className="image-preview"
-                    onError={(e) => {
-                      // If direct access fails, show a placeholder
-                      e.currentTarget.style.display = 'none';
-                    }}
-                  />
-                </div>
-              )}
-              
-              {item.url && item.type !== 'image' && (
-                <a 
-                  href={item.url} 
-                  target="_blank" 
-                  rel="noopener noreferrer"
-                  className="item-url"
+
+            {hasMoreText && (
+              <div className="load-more-container">
+                <button
+                  onClick={handleLoadMoreText}
+                  disabled={loadingText}
+                  className="load-more-btn"
                 >
-                  {item.url}
-                </a>
-              )}
-              
-              {/* For images, show source page if URL exists */}
-              {item.type === 'image' && item.url && !item.url.startsWith('data:') && (
-                <div className="item-source">
-                  Source: <a 
-                    href={item.url} 
-                    target="_blank" 
-                    rel="noopener noreferrer"
-                    className="item-source-link"
-                  >
-                    {new URL(item.url).hostname}
-                  </a>
-                </div>
-              )}
-              
-              {item.raw_content && (
-                <p className="item-text">
-                  {item.raw_content.length > 200 
-                    ? `${item.raw_content.slice(0, 200)}...` 
-                    : item.raw_content}
-                </p>
-              )}
-              
-              {item.tags.length > 0 && (
-                <div className="item-tags">
-                  {item.tags.map((tag, index) => (
-                    <span key={index} className="tag">{tag}</span>
-                  ))}
-                </div>
-              )}
-            </div>
+                  {loadingText ? 'Loading...' : 'Load More Text'}
+                </button>
+              </div>
+            )}
           </div>
-        ))}
-      </div>
-
-      {/* Pagination Controls */}
-      {items.length > 0 && (
-        <div className="pagination">
-          <div className="pagination-info">
-            Page {currentPage} • {items.length} items
-          </div>
-          
-          <div className="pagination-controls">
-            <button 
-              onClick={handlePrevPage} 
-              disabled={currentPage <= 1 || loading}
-              className="pagination-btn"
-            >
-              ← Previous
-            </button>
-            
-            <span className="pagination-current">
-              {currentPage}
-            </span>
-            
-            <button 
-              onClick={handleNextPage} 
-              disabled={!hasMore || loading}
-              className="pagination-btn"
-            >
-              Next →
-            </button>
-          </div>
-
-          {/* Alternative: Load More button */}
-          {hasMore && (
-            <button 
-              onClick={handleLoadMore} 
-              disabled={loading}
-              className="load-more-btn"
-            >
-              {loading ? 'Loading...' : 'Load More'}
-            </button>
-          )}
         </div>
-      )}
+
+        {/* Right Column: Images */}
+        <div className="split-column">
+          <div className="split-column-header">
+            <h3>🖼️ Images</h3>
+            <span className="count-badge">{imageItems.length}</span>
+          </div>
+
+          <div className="split-column-content">
+            {loadingImages && imageItems.length === 0 && <div className="loading">Loading...</div>}
+
+            {imageItems.length === 0 && !loadingImages && (
+              <div className="no-items">No images found</div>
+            )}
+
+            <div className="items-grid">
+              {imageItems.map(renderItemCard)}
+            </div>
+
+            {hasMoreImages && (
+              <div className="load-more-container">
+                <button
+                  onClick={handleLoadMoreImages}
+                  disabled={loadingImages}
+                  className="load-more-btn"
+                >
+                  {loadingImages ? 'Loading...' : 'Load More Images'}
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

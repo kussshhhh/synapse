@@ -11,7 +11,7 @@ from datetime import datetime
 from app.database import get_db
 from app.utils.s3 import upload_file, create_bucket_if_not_exists, download_file_bytes
 from app.utils.embeddings import get_embedding_service
-from app.utils.claude_service import get_claude_service
+from app.utils.gemini_service import get_gemini_service
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -204,9 +204,9 @@ async def create_item(
             logger.error(f"Failed to generate embedding for item {item_id}: {str(e)}")
             # Don't fail the request if embedding generation fails
         
-        # Add background task for Claude enhancement
+        # Add background task for Gemini enhancement
         background_tasks.add_task(
-            claude_enhance_item,
+            gemini_enhance_item,
             item_id,
             type,
             title or "",
@@ -283,96 +283,152 @@ async def get_item(item_id: str):
 
 @app.get("/api/search")
 async def search_items(q: str, skip: int = 0, limit: int = 10, semantic: bool = True, content_types: List[str] = Query([])):
-    """Search items using both text search and semantic similarity."""
-    
-    if semantic:
-        # Generate embedding for search query
-        try:
-            embedding_service = get_embedding_service()
-            query_embedding = embedding_service.generate_text_embedding(q)
-            
-            with get_db() as conn:
-                with conn.cursor() as cur:
-                    # Build WHERE clause with optional content type filter
-                    where_conditions = [
-                        "i.title ILIKE %s OR i.raw_content ILIKE %s OR EXISTS (SELECT 1 FROM unnest(i.tags) AS tag WHERE tag ILIKE %s)",
-                        "(e.embedding IS NOT NULL AND e.embedding <=> %s::vector < 0.5)"
-                    ]
-                    params = [
-                        query_embedding.tolist(), 
-                        f"%{q}%", f"%{q}%", f"%{q}%",  # Text search params
-                        query_embedding.tolist(),  # Semantic search param
-                        f"%{q}%", f"%{q}%",  # Ordering params
-                        limit, skip
-                    ]
-                    
-                    if content_types and len(content_types) > 0:
-                        # Filter for multiple content types
-                        type_placeholders = ','.join(['%s'] * len(content_types))
-                        where_conditions.append(f"i.type = ANY(ARRAY[{type_placeholders}])")
-                        for content_type in content_types:
-                            params.insert(-2, content_type)  # Insert before limit and skip
-                    
-                    where_clause = " AND ".join([f"({condition})" for condition in where_conditions])
-                    
-                    # Hybrid search: combine text search with semantic similarity
-                    cur.execute(f"""
-                        SELECT 
-                            i.id, i.user_id, i.type, i.title, i.url, i.raw_content, i.tags, i.s3_key, i.created_at,
-                            COALESCE(1 - (e.embedding <=> %s::vector), 0) as similarity_score
-                        FROM items i
-                        LEFT JOIN embeddings e ON i.id = e.item_id
-                        WHERE {where_clause}
-                        ORDER BY 
-                            CASE WHEN i.title ILIKE %s OR i.raw_content ILIKE %s THEN 1 ELSE 0 END DESC,
-                            similarity_score DESC,
-                            i.created_at DESC
-                        LIMIT %s OFFSET %s
-                    """, params)
-                    results = cur.fetchall()
-        except Exception as e:
-            logger.error(f"Semantic search failed, falling back to text search: {e}")
-            # Fall back to text search
-            semantic = False
+    """Search items using hybrid search (Text + Semantic) with Reciprocal Rank Fusion."""
     
     if not semantic:
-        # Traditional text search
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                # Build WHERE clause with optional content type filter
-                where_conditions = ["title ILIKE %s OR raw_content ILIKE %s OR EXISTS (SELECT 1 FROM unnest(tags) AS tag WHERE tag ILIKE %s)"]
-                params = [f"%{q}%", f"%{q}%", f"%{q}%", limit, skip]
-                
-                if content_types and len(content_types) > 0:
-                    # Filter for multiple content types
-                    type_placeholders = ','.join(['%s'] * len(content_types))
-                    where_conditions.append(f"type = ANY(ARRAY[{type_placeholders}])")
-                    for content_type in content_types:
-                        params.insert(-2, content_type)  # Insert before limit and skip
-                
-                where_clause = " AND ".join([f"({condition})" for condition in where_conditions])
-                
-                cur.execute(f"""
-                    SELECT id, user_id, type, title, url, raw_content, tags, s3_key, created_at
-                    FROM items 
-                    WHERE {where_clause}
-                    ORDER BY created_at DESC LIMIT %s OFFSET %s
-                """, params)
-                results = cur.fetchall()
+        # Traditional text search only
+        return await text_search_only(q, skip, limit, content_types)
+
+    try:
+        # 1. Get Text Search Results
+        text_results = await text_search_only(q, 0, limit * 2, content_types) # Get more candidates
+        
+        # 2. Get Semantic Search Results
+        semantic_results = await semantic_search_only(q, 0, limit * 2, content_types) # Get more candidates
+        
+        # 3. Combine using Reciprocal Rank Fusion (RRF)
+        # RRF score = 1 / (k + rank)
+        k = 60
+        scores = {}
+        item_map = {}
+        
+        # Process text results
+        for rank, item in enumerate(text_results):
+            if item.id not in scores:
+                scores[item.id] = 0
+                item_map[item.id] = item
+            scores[item.id] += 1 / (k + rank + 1)
+            
+        # Process semantic results
+        for rank, item in enumerate(semantic_results):
+            if item.id not in scores:
+                scores[item.id] = 0
+                item_map[item.id] = item
+            scores[item.id] += 1 / (k + rank + 1)
+            
+        # Sort by combined score
+        sorted_ids = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)
+        
+        # Apply pagination
+        start = skip
+        end = skip + limit
+        page_ids = sorted_ids[start:end]
+        
+        return [item_map[item_id] for item_id in page_ids]
+
+    except Exception as e:
+        logger.error(f"Hybrid search failed, falling back to text search: {e}")
+        return await text_search_only(q, skip, limit, content_types)
+
+async def text_search_only(q: str, skip: int, limit: int, content_types: List[str]) -> List[Item]:
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            where_conditions = ["title ILIKE %s OR raw_content ILIKE %s OR EXISTS (SELECT 1 FROM unnest(tags) AS tag WHERE tag ILIKE %s)"]
+            params = [f"%{q}%", f"%{q}%", f"%{q}%", limit, skip]
+            
+            if content_types:
+                type_placeholders = ','.join(['%s'] * len(content_types))
+                where_conditions.append(f"type = ANY(ARRAY[{type_placeholders}])")
+                for content_type in content_types:
+                    params.insert(-2, content_type)
+            
+            where_clause = " AND ".join([f"({condition})" for condition in where_conditions])
+            
+            cur.execute(f"""
+                SELECT id, user_id, type, title, url, raw_content, tags, s3_key, created_at
+                FROM items 
+                WHERE {where_clause}
+                ORDER BY created_at DESC LIMIT %s OFFSET %s
+            """, params)
+            results = cur.fetchall()
+            
+    return [Item(
+        id=str(row['id']),
+        user_id=str(row['user_id']),
+        type=row['type'],
+        title=row['title'],
+        url=row['url'],
+        raw_content=row['raw_content'],
+        tags=row['tags'] or [],
+        s3_key=row['s3_key'],
+        created_at=row['created_at']
+    ) for row in results]
+
+async def semantic_search_only(q: str, skip: int, limit: int, content_types: List[str]) -> List[Item]:
+    embedding_service = get_embedding_service()
+    query_embedding = embedding_service.generate_text_embedding(q)
     
-    return [
-        Item(
-            id=str(row['id']),
-            user_id=str(row['user_id']),
-            type=row['type'],
-            title=row['title'],
-            url=row['url'],
-            raw_content=row['raw_content'],
-            tags=row['tags'] or [],
-            s3_key=row['s3_key'],
-            created_at=row['created_at']
-        ) for row in results
-    ]
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            where_conditions = ["e.embedding <=> %s::vector < 0.5"] # Use a reasonable threshold
+            params = [query_embedding.tolist(), limit, skip] # embedding, limit, skip
+            
+            if content_types:
+                type_placeholders = ','.join(['%s'] * len(content_types))
+                where_conditions.append(f"i.type = ANY(ARRAY[{type_placeholders}])")
+                for content_type in content_types:
+                    params.insert(-2, content_type)
+            
+            where_clause = " AND ".join([f"({condition})" for condition in where_conditions])
+            
+            cur.execute(f"""
+                SELECT i.id, i.user_id, i.type, i.title, i.url, i.raw_content, i.tags, i.s3_key, i.created_at
+                FROM items i
+                JOIN embeddings e ON i.id = e.item_id
+                WHERE {where_clause}
+                ORDER BY e.embedding <=> %s::vector ASC
+                LIMIT %s OFFSET %s
+            """, [query_embedding.tolist()] + params) # Prepend embedding for ORDER BY
+            
+            # Fix params order for execute:
+            # The query uses %s placeholders.
+            # 1. WHERE clause params:
+            #    - embedding (for distance check)
+            #    - content_types (optional)
+            # 2. ORDER BY param: embedding
+            # 3. LIMIT
+            # 4. OFFSET
+            
+            # Let's reconstruct params carefully
+            execute_params = [query_embedding.tolist()] # For WHERE distance
+            if content_types:
+                execute_params.extend(content_types)
+            execute_params.append(query_embedding.tolist()) # For ORDER BY
+            execute_params.append(limit)
+            execute_params.append(skip)
+            
+            cur.execute(f"""
+                SELECT i.id, i.user_id, i.type, i.title, i.url, i.raw_content, i.tags, i.s3_key, i.created_at
+                FROM items i
+                JOIN embeddings e ON i.id = e.item_id
+                WHERE {where_clause}
+                ORDER BY e.embedding <=> %s::vector ASC
+                LIMIT %s OFFSET %s
+            """, execute_params)
+            
+            results = cur.fetchall()
+            
+    return [Item(
+        id=str(row['id']),
+        user_id=str(row['user_id']),
+        type=row['type'],
+        title=row['title'],
+        url=row['url'],
+        raw_content=row['raw_content'],
+        tags=row['tags'] or [],
+        s3_key=row['s3_key'],
+        created_at=row['created_at']
+    ) for row in results]
 
 @app.get("/api/semantic-search")
 async def semantic_search_items(q: str, skip: int = 0, limit: int = 10, threshold: float = 0.3, content_types: List[str] = Query([])):
@@ -436,16 +492,16 @@ async def semantic_search_items(q: str, skip: int = 0, limit: int = 10, threshol
 
 @app.post("/api/smart-search")
 async def iterative_smart_search(q: str, skip: int = 0, limit: int = 10, user_content_type: Optional[str] = None):
-    """Iterative smart search using Claude with 2-attempt refinement."""
+    """Iterative smart search using Gemini with 2-attempt refinement."""
     try:
         logger.info(f"Starting iterative smart search for query: '{q}'")
         
-        # Step 1: Initial Claude analysis
-        claude_service = get_claude_service()
-        initial_analysis = await claude_service.analyze_search_query(q)
-        logger.info(f"Initial Claude analysis: {initial_analysis}")
+        # Step 1: Initial Gemini analysis
+        gemini_service = get_gemini_service()
+        initial_analysis = await gemini_service.analyze_search_query(q)
+        logger.info(f"Initial Gemini analysis: {initial_analysis}")
         
-        # Use user content type or Claude's suggestion
+        # Use user content type or Gemini's suggestion
         content_type = user_content_type if user_content_type and user_content_type != 'any' else initial_analysis.get('contentType', 'any')
         
         # Step 2: Execute first search attempt
@@ -461,8 +517,8 @@ async def iterative_smart_search(q: str, skip: int = 0, limit: int = 10, user_co
         else:  # hybrid
             first_results = await search_items(search_terms, skip, limit, True, content_type)
         
-        # Step 3: Claude evaluates first results
-        # Convert results to dict format for Claude evaluation
+        # Step 3: Gemini evaluates first results
+        # Convert results to dict format for Gemini evaluation
         results_for_evaluation = []
         for result in first_results:
             if isinstance(result, dict):
@@ -472,17 +528,17 @@ async def iterative_smart_search(q: str, skip: int = 0, limit: int = 10, user_co
                 result_dict = result.dict() if hasattr(result, 'dict') else result.__dict__
                 results_for_evaluation.append(result_dict)
         
-        first_evaluation = await claude_service.evaluate_search_results(q, results_for_evaluation, 1)
+        first_evaluation = await gemini_service.evaluate_search_results(q, results_for_evaluation, 1)
         logger.info(f"First evaluation: {first_evaluation}")
         
-        # Step 4: If Claude is satisfied, return first results
+        # Step 4: If Gemini is satisfied, return first results
         if first_evaluation.get('satisfied', False):
-            logger.info("Claude satisfied with first attempt results")
+            logger.info("Gemini satisfied with first attempt results")
             return first_results
         
-        # Step 5: Claude refines search strategy
-        logger.info("Claude not satisfied, attempting refinement")
-        refinement = await claude_service.refine_search_strategy(q, first_evaluation, initial_analysis)
+        # Step 5: Gemini refines search strategy
+        logger.info("Gemini not satisfied, attempting refinement")
+        refinement = await gemini_service.refine_search_strategy(q, first_evaluation, initial_analysis)
         logger.info(f"Refinement strategy: {refinement}")
         
         # Step 6: Execute second search attempt with refinement
@@ -500,7 +556,7 @@ async def iterative_smart_search(q: str, skip: int = 0, limit: int = 10, user_co
         else:  # hybrid
             second_results = await search_items(refined_terms, skip, limit, True, refined_content_type)
         
-        # Step 7: Claude evaluates second results
+        # Step 7: Gemini evaluates second results
         results_for_evaluation_2 = []
         for result in second_results:
             if isinstance(result, dict):
@@ -509,15 +565,15 @@ async def iterative_smart_search(q: str, skip: int = 0, limit: int = 10, user_co
                 result_dict = result.dict() if hasattr(result, 'dict') else result.__dict__
                 results_for_evaluation_2.append(result_dict)
         
-        second_evaluation = await claude_service.evaluate_search_results(q, results_for_evaluation_2, 2)
+        second_evaluation = await gemini_service.evaluate_search_results(q, results_for_evaluation_2, 2)
         logger.info(f"Second evaluation: {second_evaluation}")
         
         # Step 8: Final decision - return second results if satisfied, otherwise first results
         if second_evaluation.get('satisfied', False):
-            logger.info("Claude satisfied with second attempt, returning refined results")
+            logger.info("Gemini satisfied with second attempt, returning refined results")
             return second_results
         else:
-            logger.info("Claude not satisfied with second attempt, falling back to hybrid search")
+            logger.info("Gemini not satisfied with second attempt, falling back to hybrid search")
             # Fall back to simple hybrid search as final option
             fallback_results = await search_items(q, skip, limit, True, user_content_type)
             logger.info(f"Returning fallback hybrid search results: {len(fallback_results)} items")
@@ -529,38 +585,38 @@ async def iterative_smart_search(q: str, skip: int = 0, limit: int = 10, user_co
         logger.info("Falling back to regular hybrid search due to error")
         return await search_items(q, skip, limit, True, user_content_type)
 
-async def claude_enhance_item(item_id: str, item_type: str, title: str, url: str, raw_content: str, s3_key: Optional[str]):
-    """Background task to enhance item with Claude-generated tags."""
+async def gemini_enhance_item(item_id: str, item_type: str, title: str, url: str, raw_content: str, s3_key: Optional[str]):
+    """Background task to enhance item with Gemini-generated tags."""
     try:
-        logger.info(f"Starting Claude enhancement for item {item_id}")
+        logger.info(f"Starting Gemini enhancement for item {item_id}")
         
-        # Get Claude service
-        claude_service = get_claude_service()
-        claude_tags = []
+        # Get Gemini service
+        gemini_service = get_gemini_service()
+        gemini_tags = []
         
         if item_type == 'image' and s3_key:
             try:
                 # Download image from S3
-                logger.info(f"Downloading image {s3_key} for Claude analysis")
+                logger.info(f"Downloading image {s3_key} for Gemini analysis")
                 image_bytes = download_file_bytes(s3_key)
-                claude_tags = await claude_service.analyze_image_for_tags(
+                gemini_tags = await gemini_service.analyze_image_for_tags(
                     image_bytes, title, url
                 )
-                logger.info(f"Claude analyzed image and generated tags: {claude_tags}")
+                logger.info(f"Gemini analyzed image and generated tags: {gemini_tags}")
             except Exception as e:
                 logger.error(f"Failed to analyze image {s3_key}: {e}")
                 
         elif item_type in ['url', 'pdf'] and raw_content:
             try:
-                claude_tags = await claude_service.analyze_article_for_tags(
+                gemini_tags = await gemini_service.analyze_article_for_tags(
                     raw_content, title, url
                 )
-                logger.info(f"Claude analyzed content and generated tags: {claude_tags}")
+                logger.info(f"Gemini analyzed content and generated tags: {gemini_tags}")
             except Exception as e:
                 logger.error(f"Failed to analyze content for item {item_id}: {e}")
         
-        # Merge with existing tags if we got any from Claude
-        if claude_tags:
+        # Merge with existing tags if we got any from Gemini
+        if gemini_tags:
             with get_db() as conn:
                 with conn.cursor() as cur:
                     # Get current tags
@@ -570,7 +626,7 @@ async def claude_enhance_item(item_id: str, item_type: str, title: str, url: str
                     if result:
                         existing_tags = result['tags'] or []
                         # Merge and deduplicate tags
-                        enhanced_tags = list(set(existing_tags + claude_tags))
+                        enhanced_tags = list(set(existing_tags + gemini_tags))
                         
                         # Update item with enhanced tags
                         cur.execute(
@@ -580,26 +636,26 @@ async def claude_enhance_item(item_id: str, item_type: str, title: str, url: str
                         logger.info(f"Updated item {item_id} with enhanced tags: {enhanced_tags}")
                 conn.commit()
         else:
-            logger.info(f"No Claude tags generated for item {item_id}")
+            logger.info(f"No Gemini tags generated for item {item_id}")
             
     except Exception as e:
-        logger.error(f"Claude enhancement failed for item {item_id}: {e}")
+        logger.error(f"Gemini enhancement failed for item {item_id}: {e}")
 
 @app.post("/api/search/analyze")
 async def analyze_search_query(query: str):
-    """Analyze search query with Claude to determine best search strategy."""
+    """Analyze search query with Gemini to determine best search strategy."""
     try:
-        claude_service = get_claude_service()
-        analysis = await claude_service.analyze_search_query(query)
+        gemini_service = get_gemini_service()
+        analysis = await gemini_service.analyze_search_query(query)
         return analysis
     except Exception as e:
         logger.error(f"Search analysis failed: {e}")
-        # Return default analysis if Claude fails
+        # Return default analysis if Gemini fails
         return {
             "searchMode": "hybrid",
             "contentTypes": ["any"],
             "enhancedTerms": [query],
-            "reasoning": "Claude analysis failed, using default hybrid search"
+            "reasoning": "Gemini analysis failed, using default hybrid search"
         }
 
 if __name__ == "__main__":

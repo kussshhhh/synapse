@@ -9,6 +9,7 @@ dependencies = [
     "beautifulsoup4>=4.14.2",
     "boto3>=1.40.69",
     "fastapi[cors]>=0.121.0",
+    "google-generativeai>=0.8.5",
     "opencv-python>=4.12.0.88",
     "pgvector>=0.4.1",
     "pillow>=12.0.0",
